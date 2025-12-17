@@ -6,67 +6,67 @@ app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 3000;
 
-const certPem = process.env.CERT_PEM || process.env.RIGHTMOVE_CERT_PEM;
-const keyPem = process.env.KEY_PEM || process.env.RIGHTMOVE_KEY_PEM;
-const caCertPem = process.env.CA_CERT_PEM || process.env.RIGHTMOVE_CA_CERT_PEM;
-
-app.get('/health', (req, res) => {
-  res.json({ status: 'ok', hasCert: !!certPem, hasKey: !!keyPem });
-});
+// Rightmove RTDF endpoints
+const RIGHTMOVE_TEST_URL = 'https://adfapi.adftest.rightmove.com/v1/property/sendpropertydetails';
+const RIGHTMOVE_LIVE_URL = 'https://adfapi.rightmove.co.uk/v1/property/sendpropertydetails';
 
 app.post('/proxy', async (req, res) => {
+  console.log('Received request, test_mode:', req.body.test_mode);
+  
   try {
-    if (!certPem || !keyPem) {
-      return res.status(500).json({ error: 'Missing certificate or key' });
+    const { payload, test_mode } = req.body;
+    
+    if (!payload) {
+      return res.status(400).json({ error: 'Missing payload' });
     }
 
-    const { payload, test_mode } = req.body;
-    console.log('Received request, test_mode:', test_mode);
-    
-    const baseUrl = test_mode ? 'adfapi.adftest.rightmove.com' : 'adfapi.rightmove.com';
+    const cert = process.env.RIGHTMOVE_CERT_PEM;
+    const key = process.env.RIGHTMOVE_KEY_PEM;
+    const ca = process.env.RIGHTMOVE_CA_CERT_PEM;
 
-    // NO passphrase - key is unencrypted
-    const httpsAgent = new https.Agent({
-      cert: certPem,
-      key: keyPem,
-      ca: caCertPem || undefined,
+    if (!cert || !key) {
+      console.error('Missing certificate or key');
+      return res.status(500).json({ error: 'Missing certificate configuration' });
+    }
+
+    const agent = new https.Agent({
+      cert: cert,
+      key: key,
+      ca: ca,
+      rejectUnauthorized: false
     });
 
-    const postData = JSON.stringify(payload);
+    const targetUrl = test_mode ? RIGHTMOVE_TEST_URL : RIGHTMOVE_LIVE_URL;
+    console.log('Forwarding to:', targetUrl);
 
-    const options = {
-      hostname: baseUrl,
-      port: 443,
-      path: '/v1/property/sendpropertydetails',
+    const response = await fetch(targetUrl, {
       method: 'POST',
-      agent: httpsAgent,
       headers: {
         'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData),
       },
-    };
-
-    const proxyReq = https.request(options, (proxyRes) => {
-      let data = '';
-      proxyRes.on('data', (chunk) => { data += chunk; });
-      proxyRes.on('end', () => {
-        console.log('Rightmove response:', proxyRes.statusCode, data);
-        res.status(proxyRes.statusCode).json({ status: proxyRes.statusCode, response: data });
-      });
+      body: JSON.stringify(payload),
+      agent: agent
     });
 
-    proxyReq.on('error', (e) => {
-      console.error('Proxy error:', e);
-      res.status(500).json({ error: 'Proxy request failed', message: e.message, code: e.code });
-    });
+    const responseText = await response.text();
+    console.log('Rightmove response status:', response.status);
+    console.log('Rightmove response:', responseText);
 
-    proxyReq.write(postData);
-    proxyReq.end();
-
+    res.status(response.status).send(responseText);
   } catch (error) {
     console.error('Error:', error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ 
+      error: 'Proxy request failed', 
+      message: error.message,
+      code: error.code 
+    });
   }
 });
 
-app.listen(PORT, () => console.log(`Server on port ${PORT}`));
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+
+app.listen(PORT, () => {
+  console.log(`Rightmove proxy running on port ${PORT}`);
+});
