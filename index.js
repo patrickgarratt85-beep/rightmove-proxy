@@ -4,59 +4,32 @@ const https = require('https');
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3000;
 
-// Configuration
-const CERT_PEM = process.env.RIGHTMOVE_CERT_PEM;
-const KEY_PEM = process.env.RIGHTMOVE_KEY_PEM;
-const CA_CERT_PEM = process.env.RIGHTMOVE_CA_CERT_PEM;
-const NETWORK_ID = process.env.RIGHTMOVE_NETWORK_ID;
-const BRANCH_ID = process.env.RIGHTMOVE_BRANCH_ID;
+const certPem = process.env.CERT_PEM || process.env.RIGHTMOVE_CERT_PEM;
+const keyPem = process.env.KEY_PEM || process.env.RIGHTMOVE_KEY_PEM;
+const caCertPem = process.env.CA_CERT_PEM || process.env.RIGHTMOVE_CA_CERT_PEM;
 
-// Log startup config (without sensitive data)
-console.log('Rightmove proxy running on port', PORT);
-console.log('Certificate configured:', !!CERT_PEM);
-console.log('Key configured:', !!KEY_PEM);
-console.log('CA Certificate configured:', !!CA_CERT_PEM);
-console.log('Network ID:', NETWORK_ID);
-console.log('Branch ID:', BRANCH_ID);
-
-// Health check endpoint
 app.get('/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+  res.json({ status: 'ok', hasCert: !!certPem, hasKey: !!keyPem });
 });
 
-// Main proxy endpoint
 app.post('/proxy', async (req, res) => {
   try {
-    const { payload, test_mode } = req.body;
-    
-    console.log('Received proxy request, test_mode:', test_mode);
-    console.log('Payload:', JSON.stringify(payload, null, 2));
-
-    if (!CERT_PEM || !KEY_PEM) {
-      console.error('Missing certificate or key configuration');
-      return res.status(500).json({ 
-        error: 'Proxy not configured correctly - missing certificates' 
-      });
+    if (!certPem || !keyPem) {
+      return res.status(500).json({ error: 'Missing certificate or key' });
     }
 
-    // Determine API endpoint based on test mode
-    const baseUrl = test_mode 
-      ? 'adfapi.adftest.rightmove.com'
-      : 'adfapi.rightmove.com';
+    const { payload, test_mode } = req.body;
+    console.log('Received request, test_mode:', test_mode);
     
-    const path = '/v1/property/sendpropertydetails';
+    const baseUrl = test_mode ? 'adfapi.adftest.rightmove.com' : 'adfapi.rightmove.com';
 
-    console.log(`Proxying to ${baseUrl}${path} (test_mode: ${test_mode})`);
-
-    // Create HTTPS agent with mTLS certificates
-    // Note: No passphrase needed as key is not encrypted
+    // NO passphrase - key is unencrypted
     const httpsAgent = new https.Agent({
-      cert: CERT_PEM,
-      key: KEY_PEM,
-      ca: CA_CERT_PEM || undefined,
-      rejectUnauthorized: true,
+      cert: certPem,
+      key: keyPem,
+      ca: caCertPem || undefined,
     });
 
     const postData = JSON.stringify(payload);
@@ -64,7 +37,7 @@ app.post('/proxy', async (req, res) => {
     const options = {
       hostname: baseUrl,
       port: 443,
-      path: path,
+      path: '/v1/property/sendpropertydetails',
       method: 'POST',
       agent: httpsAgent,
       headers: {
@@ -73,198 +46,27 @@ app.post('/proxy', async (req, res) => {
       },
     };
 
-    // Make the request to Rightmove
-    const rightmoveResponse = await new Promise((resolve, reject) => {
-      const req = https.request(options, (response) => {
-        let data = '';
-        
-        response.on('data', (chunk) => {
-          data += chunk;
-        });
-        
-        response.on('end', () => {
-          resolve({
-            statusCode: response.statusCode,
-            headers: response.headers,
-            body: data,
-          });
-        });
+    const proxyReq = https.request(options, (proxyRes) => {
+      let data = '';
+      proxyRes.on('data', (chunk) => { data += chunk; });
+      proxyRes.on('end', () => {
+        console.log('Rightmove response:', proxyRes.statusCode, data);
+        res.status(proxyRes.statusCode).json({ status: proxyRes.statusCode, response: data });
       });
-
-      req.on('error', (error) => {
-        console.error('Request error:', error);
-        reject(error);
-      });
-
-      req.write(postData);
-      req.end();
     });
 
-    console.log('Rightmove response status:', rightmoveResponse.statusCode);
-    console.log('Rightmove response body:', rightmoveResponse.body);
+    proxyReq.on('error', (e) => {
+      console.error('Proxy error:', e);
+      res.status(500).json({ error: 'Proxy request failed', message: e.message, code: e.code });
+    });
 
-    // Parse response body
-    let responseBody;
-    try {
-      responseBody = JSON.parse(rightmoveResponse.body);
-    } catch {
-      responseBody = { raw: rightmoveResponse.body };
-    }
-
-    res.status(rightmoveResponse.statusCode).json(responseBody);
+    proxyReq.write(postData);
+    proxyReq.end();
 
   } catch (error) {
-    console.error('Proxy error:', error);
-    res.status(500).json({ 
-      error: 'Proxy request failed', 
-      message: error.message,
-      code: error.code 
-    });
+    console.error('Error:', error);
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Remove property endpoint
-app.post('/proxy/remove', async (req, res) => {
-  try {
-    const { payload, test_mode } = req.body;
-    
-    console.log('Received remove request, test_mode:', test_mode);
-
-    if (!CERT_PEM || !KEY_PEM) {
-      return res.status(500).json({ 
-        error: 'Proxy not configured correctly - missing certificates' 
-      });
-    }
-
-    const baseUrl = test_mode 
-      ? 'adfapi.adftest.rightmove.com'
-      : 'adfapi.rightmove.com';
-    
-    const path = '/v1/property/removeproperty';
-
-    const httpsAgent = new https.Agent({
-      cert: CERT_PEM,
-      key: KEY_PEM,
-      ca: CA_CERT_PEM || undefined,
-      rejectUnauthorized: true,
-    });
-
-    const postData = JSON.stringify(payload);
-
-    const options = {
-      hostname: baseUrl,
-      port: 443,
-      path: path,
-      method: 'POST',
-      agent: httpsAgent,
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData),
-      },
-    };
-
-    const rightmoveResponse = await new Promise((resolve, reject) => {
-      const req = https.request(options, (response) => {
-        let data = '';
-        response.on('data', (chunk) => { data += chunk; });
-        response.on('end', () => {
-          resolve({
-            statusCode: response.statusCode,
-            body: data,
-          });
-        });
-      });
-      req.on('error', reject);
-      req.write(postData);
-      req.end();
-    });
-
-    let responseBody;
-    try {
-      responseBody = JSON.parse(rightmoveResponse.body);
-    } catch {
-      responseBody = { raw: rightmoveResponse.body };
-    }
-
-    res.status(rightmoveResponse.statusCode).json(responseBody);
-
-  } catch (error) {
-    console.error('Remove proxy error:', error);
-    res.status(500).json({ error: 'Proxy request failed', message: error.message });
-  }
-});
-
-// Get branch properties endpoint
-app.post('/proxy/list', async (req, res) => {
-  try {
-    const { payload, test_mode } = req.body;
-    
-    console.log('Received list request, test_mode:', test_mode);
-
-    if (!CERT_PEM || !KEY_PEM) {
-      return res.status(500).json({ 
-        error: 'Proxy not configured correctly - missing certificates' 
-      });
-    }
-
-    const baseUrl = test_mode 
-      ? 'adfapi.adftest.rightmove.com'
-      : 'adfapi.rightmove.com';
-    
-    const path = '/v1/property/getbranchpropertylist';
-
-    const httpsAgent = new https.Agent({
-      cert: CERT_PEM,
-      key: KEY_PEM,
-      ca: CA_CERT_PEM || undefined,
-      rejectUnauthorized: true,
-    });
-
-    const postData = JSON.stringify(payload);
-
-    const options = {
-      hostname: baseUrl,
-      port: 443,
-      path: path,
-      method: 'POST',
-      agent: httpsAgent,
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData),
-      },
-    };
-
-    const rightmoveResponse = await new Promise((resolve, reject) => {
-      const req = https.request(options, (response) => {
-        let data = '';
-        response.on('data', (chunk) => { data += chunk; });
-        response.on('end', () => {
-          resolve({
-            statusCode: response.statusCode,
-            body: data,
-          });
-        });
-      });
-      req.on('error', reject);
-      req.write(postData);
-      req.end();
-    });
-
-    let responseBody;
-    try {
-      responseBody = JSON.parse(rightmoveResponse.body);
-    } catch {
-      responseBody = { raw: rightmoveResponse.body };
-    }
-
-    res.status(rightmoveResponse.statusCode).json(responseBody);
-
-  } catch (error) {
-    console.error('List proxy error:', error);
-    res.status(500).json({ error: 'Proxy request failed', message: error.message });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`Server listening on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server on port ${PORT}`));
