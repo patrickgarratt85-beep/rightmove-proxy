@@ -3,52 +3,53 @@ const https = require('https');
 const axios = require('axios');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
 
-// Safely parse certificates with newline handling
-function parseCert(envVar) {
-  if (!envVar) return undefined;
-  return envVar.replace(/\\n/g, '\n');
-}
+// Health check
+app.get('/', (req, res) => {
+  res.json({ status: 'ok', service: 'rightmove-proxy' });
+});
 
-// Create agent lazily on first request to avoid startup crash
-let agent = null;
-function getAgent() {
-  if (agent) return agent;
-  
-  const cert = parseCert(process.env.RIGHTMOVE_CERT_PEM);
-  const key = parseCert(process.env.RIGHTMOVE_KEY_PEM);
-  const ca = parseCert(process.env.RIGHTMOVE_CA_CERT_PEM);
-  
-  console.log('Creating mTLS agent...');
-  console.log('CERT present:', !!cert, 'length:', cert?.length);
-  console.log('KEY present:', !!key, 'length:', key?.length);
-  console.log('CA present:', !!ca, 'length:', ca?.length);
-  
-  agent = new https.Agent({ cert, key, ca });
-  return agent;
-}
-
+// Proxy endpoint
 app.post('/proxy', async (req, res) => {
   try {
     const { payload, target_url } = req.body;
-    const rightmoveUrl = target_url || 'https://adfapi.adftest.rightmove.com/v1/property/sendpropertydetails';
     
-    console.log('Proxying to:', rightmoveUrl);
+    if (!payload || !target_url) {
+      return res.status(400).json({ error: 'Missing payload or target_url' });
+    }
+
+    console.log('Proxying request to:', target_url);
     
-    const response = await axios.post(rightmoveUrl, payload, {
-      httpsAgent: getAgent(),
-      headers: { 'Content-Type': 'application/json' },
+    // Decode the base64 P12 file
+    const p12Buffer = Buffer.from(process.env.RIGHTMOVE_P12_BASE64, 'base64');
+    
+    const agent = new https.Agent({
+      pfx: p12Buffer,
+      passphrase: process.env.RIGHTMOVE_P12_PASSPHRASE || '',
     });
-    
+
+    const response = await axios.post(target_url, payload, {
+      httpsAgent: agent,
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 30000,
+    });
+
+    console.log('Rightmove response status:', response.status);
     res.json(response.data);
   } catch (error) {
     console.error('Proxy error:', error.message);
-    res.status(500).json({ error: error.message });
+    if (error.response) {
+      console.error('Response data:', error.response.data);
+    }
+    res.status(error.response?.status || 500).json({
+      error: error.message,
+      details: error.response?.data || null,
+    });
   }
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
-
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Listening on ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Rightmove proxy listening on port ${PORT}`);
+});
