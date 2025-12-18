@@ -4,36 +4,33 @@ const https = require('https');
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
-// Health check endpoint
+const RIGHTMOVE_URL = 'https://adfapi.rightmove.co.uk/v1/property/sendpropertydetails';
+
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'rightmove-proxy' });
 });
 
-// Proxy endpoint
-app.post('/proxy', async (req, res) => {
+app.post('/proxy', (req, res) => {
   try {
-    const { url, method, headers, body } = req.body;
+    const { payload, test_mode } = req.body;
     
-    console.log(`Proxying ${method} request to: ${url}`);
+    console.log('Received payload:', JSON.stringify(payload).substring(0, 200));
     
-    // Create HTTPS agent with client certificate (PFX/P12 format)
     const agent = new https.Agent({
       pfx: Buffer.from(process.env.RIGHTMOVE_P12_BASE64, 'base64'),
       passphrase: process.env.RIGHTMOVE_P12_PASSPHRASE,
       rejectUnauthorized: true
     });
     
-    const parsedUrl = new URL(url);
-    const requestBody = JSON.stringify(body);
+    const requestBody = JSON.stringify(payload);
     
     const options = {
-      hostname: parsedUrl.hostname,
+      hostname: 'adfapi.rightmove.co.uk',
       port: 443,
-      path: parsedUrl.pathname + parsedUrl.search,
-      method: method || 'POST',
+      path: '/v1/property/sendpropertydetails',
+      method: 'POST',
       agent: agent,
       headers: {
-        ...headers,
         'Content-Type': 'application/json',
         'Content-Length': Buffer.byteLength(requestBody)
       }
@@ -43,34 +40,24 @@ app.post('/proxy', async (req, res) => {
       let data = '';
       proxyRes.on('data', chunk => data += chunk);
       proxyRes.on('end', () => {
-        console.log(`Rightmove response status: ${proxyRes.statusCode}`);
-        console.log(`Rightmove response body: ${data}`);
+        console.log('Rightmove response:', proxyRes.statusCode, data);
         res.status(proxyRes.statusCode).send(data);
       });
     });
     
     proxyReq.on('error', (error) => {
-      console.error('Proxy request error:', error.message);
-      res.status(500).json({ 
-        status: 'error', 
-        message: error.message,
-        code: error.code 
-      });
+      console.error('Request error:', error);
+      res.status(500).json({ status: 'error', message: error.message });
     });
     
     proxyReq.write(requestBody);
     proxyReq.end();
     
   } catch (error) {
-    console.error('Proxy error:', error);
-    res.status(500).json({ 
-      status: 'error', 
-      message: error.message 
-    });
+    console.error('Error:', error);
+    res.status(500).json({ status: 'error', message: error.message });
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Rightmove proxy listening on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Rightmove proxy on port ${PORT}`));
