@@ -6,28 +6,39 @@ const forge = require('node-forge');
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
 
 app.post('/proxy', async (req, res) => {
   try {
     const { payload, target_url } = req.body;
     
-    console.log('Target URL:', target_url);
-    
     const p12Base64 = process.env.RIGHTMOVE_P12_BASE64;
-    const passphrase = process.env.RIGHTMOVE_P12_PASSPHRASE;
+    const p12Password = process.env.RIGHTMOVE_P12_PASSPHRASE;
     
-    const p12Buffer = Buffer.from(p12Base64, 'base64');
-    const p12Asn1 = forge.asn1.fromDer(p12Buffer.toString('binary'));
-    const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, passphrase);
+    // Parse P12
+    const p12Der = forge.util.decode64(p12Base64);
+    const p12Asn1 = forge.asn1.fromDer(p12Der);
+    const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, p12Password);
     
+    // Get ALL certificates and concatenate them
     const certBags = p12.getBags({ bagType: forge.pki.oids.certBag });
-    const cert = forge.pki.certificateToPem(certBags[forge.pki.oids.certBag][0].cert);
+    const certs = certBags[forge.pki.oids.certBag] || [];
+    const certChain = certs.map(bag => forge.pki.certificateToPem(bag.cert)).join('\n');
     
+    // Get private key
     const keyBags = p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag });
-    const key = forge.pki.privateKeyToPem(keyBags[forge.pki.oids.pkcs8ShroudedKeyBag][0].key);
+    const keyBag = keyBags[forge.pki.oids.pkcs8ShroudedKeyBag][0];
+    const key = forge.pki.privateKeyToPem(keyBag.key);
     
-    const agent = new https.Agent({ cert, key });
+    console.log(`Certs found: ${certs.length}, Target: ${target_url}`);
+    
+    const agent = new https.Agent({
+      cert: certChain,
+      key: key,
+      rejectUnauthorized: true
+    });
     
     const response = await axios.post(target_url, payload, {
       httpsAgent: agent,
@@ -36,7 +47,7 @@ app.post('/proxy', async (req, res) => {
     
     res.json(response.data);
   } catch (error) {
-    console.error('Error:', error.message);
+    console.error('Proxy error:', error.message);
     res.status(error.response?.status || 500).json({
       error: error.message,
       details: error.response?.data
@@ -44,4 +55,6 @@ app.post('/proxy', async (req, res) => {
   }
 });
 
-app.listen(process.env.PORT || 3000);
+app.listen(process.env.PORT || 3000, () => {
+  console.log('Proxy running');
+});
